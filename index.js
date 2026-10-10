@@ -5,23 +5,26 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const admin = require('firebase-admin');
 const { getFirestore } = require('firebase-admin/firestore');
+const serverless = require('serverless-http');
 
-const fbApp = admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-  })
-});
-
-const db = getFirestore(fbApp, 'rhinoverse');
-console.log("✅ Using Firestore Database: rhinoverse");
-const usersCollection = db.collection('users');
-const productsCollection = db.collection('products');
-const withdrawalsCollection = db.collection('withdrawals');
+// Safe Firebase init
+let db, usersCollection, productsCollection, withdrawalsCollection;
+try {
+  const fbApp = admin.apps.length? admin.app() : admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
+    })
+  });
+  db = getFirestore(fbApp, 'rhinoverse');
+  console.log("✅ Using Firestore Database: rhinoverse");
+  usersCollection = db.collection('users');
+  productsCollection = db.collection('products');
+  withdrawalsCollection = db.collection('withdrawals');
+} catch(e){ console.error("Firebase init error", e.message); }
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'rhinoverse-secret-2025';
 const WELCOME_BONUS = parseInt(process.env.WELCOME_BONUS) || 3000;
 const CHECKIN_REWARD = parseInt(process.env.CHECKIN_REWARD) || 100;
@@ -46,22 +49,22 @@ async function getUserById(id) {
   return { id: doc.id,...doc.data() };
 }
 async function saveUser(user) { await usersCollection.doc(user.id).set(user); return user; }
-
 async function initProducts() {
-  const snapshot = await productsCollection.limit(1).get();
-  if (snapshot.empty) {
-    const defaultProducts = [
-      { id: 1, name: 'Rhino Calf', price: 20000, dailyIncome: 5000, cycleDays: 60, badge: 'Starter' },
-      { id: 2, name: 'Rhino Skin', price: 50000, dailyIncome: 12000, cycleDays: 60, badge: 'Armor' },
-      { id: 3, name: 'Rhino Horn', price: 100000, dailyIncome: 25000, cycleDays: 60, badge: 'Attack' },
-      { id: 4, name: 'Rhino Vision', price: 130000, dailyIncome: 32000, cycleDays: 60, badge: 'HOT' },
-      { id: 5, name: 'Rhino Charge', price: 500000, dailyIncome: 70000, cycleDays: 60, badge: 'HOT' },
-      { id: 6, name: 'Rhino King', price: 1000000, dailyIncome: 150000, cycleDays: 60, badge: 'Alpha' },
-      { id: 7, name: 'Rhino Legacy', price: 2000000, dailyIncome: 320000, cycleDays: 60, badge: 'Conservation' },
-    ];
-    for (const p of defaultProducts) { await productsCollection.doc(p.id.toString()).set(p); }
-    console.log("✅ Products initialized in rhinoverse DB");
-  }
+  try{
+    const snapshot = await productsCollection.limit(1).get();
+    if (snapshot.empty) {
+      const defaultProducts = [
+        { id: 1, name: 'Rhino Calf', price: 20000, dailyIncome: 5000, cycleDays: 60, badge: 'Starter' },
+        { id: 2, name: 'Rhino Skin', price: 50000, dailyIncome: 12000, cycleDays: 60, badge: 'Armor' },
+        { id: 3, name: 'Rhino Horn', price: 100000, dailyIncome: 25000, cycleDays: 60, badge: 'Attack' },
+        { id: 4, name: 'Rhino Vision', price: 130000, dailyIncome: 32000, cycleDays: 60, badge: 'HOT' },
+        { id: 5, name: 'Rhino Charge', price: 500000, dailyIncome: 70000, cycleDays: 60, badge: 'HOT' },
+        { id: 6, name: 'Rhino King', price: 1000000, dailyIncome: 150000, cycleDays: 60, badge: 'Alpha' },
+        { id: 7, name: 'Rhino Legacy', price: 2000000, dailyIncome: 320000, cycleDays: 60, badge: 'Conservation' },
+      ];
+      for (const p of defaultProducts) { await productsCollection.doc(p.id.toString()).set(p); }
+    }
+  }catch(e){ console.log("initProducts skipped", e.message); }
 }
 initProducts();
 
@@ -72,14 +75,9 @@ async function authenticate(req, res, next) {
   try { const decoded = jwt.verify(token, JWT_SECRET); req.userId = decoded.id; next(); }
   catch { return res.status(401).json({ error: 'Invalid token' }); }
 }
-function adminAuth(req, res, next) {
-  const provided = req.headers['admin-password'];
-  if (provided!== ADMIN_PASSWORD) return res.status(403).json({ error: 'Admin access denied' });
-  next();
-}
 
 app.get('/api/health', (req, res) => { res.json({ status: 'healthy', db:'rhinoverse', time: new Date().toISOString() }); });
-app.get('/', (req, res) => { res.json({ status: 'Rhinoverse Backend Running on rhinoverse DB' }); });
+app.get('/', (req, res) => { res.json({ status: 'Rhinoverse Backend Running' }); });
 
 app.post('/api/register', async (req, res) => {
   try {
@@ -119,8 +117,7 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { phone, password } = req.body;
-    const loginId = phone;
-    if (!loginId ||!password) return res.status(400).json({ error: 'Phone and password required' });
+    if (!phone ||!password) return res.status(400).json({ error: 'Phone and password required' });
     const user = await findUser(phone);
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     const isMatch = await bcrypt.compare(password, user.password);
@@ -155,7 +152,7 @@ app.post('/api/rent', authenticate, async (req, res) => {
     while (currentUser.upline && level <= 3) { const upline = await findUser(currentUser.upline); if (!upline) break; uplineChain.push({ user: upline, level: level }); currentUser = upline; level++; }
     for (const entry of uplineChain) { const rate = commissionRates[entry.level] || 0; const commission = Math.round(product.price * rate); if (commission > 0) { entry.user.wallets.withdrawal += commission; entry.user.commissions[entry.level] = (entry.user.commissions[entry.level] || 0) + commission; await saveUser(entry.user); } }
     await saveUser(user);
-    res.json({ message: 'Product rented', product: product.name, newBalance: user.wallets.recharge, commissions: uplineChain.map(e => ({ upline: e.user.username, level: e.level, amount: Math.round(product.price * commissionRates[e.level]) })) });
+    res.json({ message: 'Product rented', product: product.name, newBalance: user.wallets.recharge });
   } catch (error) { console.error(error); res.status(500).json({ error: 'Rental failed' }); }
 });
 app.post('/api/checkin', authenticate, async (req, res) => {
@@ -198,8 +195,5 @@ app.post('/api/admin/withdraw/:id', async (req, res) => {
   else res.status(400).json({ error: 'Invalid action' });
 });
 
-
-if (require.main === module) {
-  module.exports = app;
-}
 module.exports = app;
+module.exports.handler = serverless(app);
